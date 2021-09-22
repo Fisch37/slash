@@ -67,12 +67,14 @@ def message_from_interaction(interaction : discord.Interaction) -> discord.Messa
 
 def args_from_interaction(interaction : discord.Interaction, func : Callable) -> list[Any]:
     options = interaction.data.get("options")
+    if options is None:
+        return list()
 
-    resolved = interaction.data.get("resolved")
-    resolvedUsers = resolved.get("users")
-    resolvedRoles = resolved.get("roles")
-    resolvedMembers = resolved.get("members")
-    resolvedChannels = resolved.get("channels")
+    resolved = interaction.data.get("resolved",{})
+    resolvedUsers = resolved.get("users",{})
+    resolvedRoles = resolved.get("roles",{})
+    resolvedMembers = resolved.get("members",{})
+    resolvedChannels = resolved.get("channels",{})
 
     args = []
     for opt in options:
@@ -165,8 +167,8 @@ class DuplicationWarning(Warning):
     pass
 
 
-# Fancy UI stuffy-mathing
-@dataclasses.dataclass(frozen=True,unsafe_hash=False,order=False)
+# Fancy API stuffy-mathing
+@dataclasses.dataclass(frozen=False,unsafe_hash=False,order=False,init=False)
 class Choices:
     def __init__(self, choices : dict[Any, Any],required : bool = False):
         self.choices = tuple([AppOptionChoice(name,value) for name, value in choices.items()])

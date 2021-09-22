@@ -2,8 +2,6 @@ if __name__=="__main__": raise RuntimeError("This module cannot be executed as r
 from typing import *
 import discord, json, dataclasses, re, aiohttp, asyncio, logging
 
-from discord.types.user import PartialUser
-
 
 SLASH_COMMAND = 1
 USER_COMMAND = 2 # Command available via the apps section in a user menu
@@ -135,6 +133,8 @@ class CommandOptions:
 
     @classmethod
     def from_raw(cls, iterable : Iterable[dict[str,Any]]):
+        if iterable is None:
+            return cls(tuple())
         options = []
         for raw in iterable:
             raw.setdefault("required",False)

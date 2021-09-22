@@ -11,8 +11,10 @@ class KeywordWarning(Warning):
     pass
 
 class SlashClient(discord.Client):
-    def __init__(self,*, autocommit : bool = True,loop : Union[asyncio.AbstractEventLoop, None] = None,**options : Any):
-        super().__init__(loop=loop,**options)
+    
+    # Properties autocommit, slash_commands, user_commands, message_commands
+    def __init__(self,*, autocommit : bool = True,**options : Any):
+        super().__init__(**options)
 
         self.autocommit = autocommit
 
@@ -37,6 +39,11 @@ class SlashClient(discord.Client):
             for command in self.slash_commands.union(self.user_commands,self.message_commands):
                 if command.id == int(interaction.data.get("id")):
                     logging.debug("Found matching command for interaction")
+                    if command.__func__ is None:
+                        logging.warn("Received interaction that doesn't have a function associated. This shouldn't happen!")
+                        break # That still only counts as one!
+                        pass
+
                     interactArg : list[Union[discord.Member,discord.Message]] = []
                     if command.__type__ == USER_COMMAND:
                         interactArg.append(target_from_interaction(interaction))
@@ -50,8 +57,8 @@ class SlashClient(discord.Client):
                     else:
                         interactArg = interaction
                         pass
-
                     await command.__func__(interaction, *interactArg)
+                    break # There can only be one!
                     pass
                 pass
             stampEnd = time.time()
@@ -82,7 +89,6 @@ class SlashClient(discord.Client):
                     # Raw is a dictionary with following values: ("type":int,"name":str,["description":str],["options":CommandOptions],"guild_id":int,"default_permission":bool,"func":Callable)
                     cmd_type           = raw["type"]
                     name               = raw["name"]
-                    print(name)
                     description        = raw["description"]
                     options            = raw.get("options")
                     guild_id           = raw.get("guild_id")
@@ -111,7 +117,7 @@ class SlashClient(discord.Client):
                     pass
 
                 if self.autocommit:
-                    await self.update()
+                    await self.update_commands()
                 self.__retrieved_commands__ = True
                 pass
 
@@ -137,7 +143,16 @@ class SlashClient(discord.Client):
     
     # New Functions
 
-    async def update(self):
+    async def command_garbage_collector(self):
+        """Deletes all commands from the API that don't have a function associated to it"""
+        for command in self.slash_commands.union(self.user_commands,self.message_commands):
+            if command.__func__ is None and command.is_identified():
+                await self.delete_command(command)
+                pass
+            pass
+        pass
+
+    async def update_commands(self):
         """Commit all changes in commands to the API"""
         if self.application_id is None:
             raise RuntimeError("No Application ID found. Is the client logged in yet?")
@@ -159,14 +174,14 @@ class SlashClient(discord.Client):
         results = await asyncio.gather(*tasks,return_exceptions=False)
         pass
 
-    async def register(self,command : Command) -> BaseCommand:
+    async def register_command(self,command : Command) -> BaseCommand:
         """Register a command. Simpler version of `BaseCommand.register`"""
         if self.application_id is None:
             raise RuntimeError("Could not find application_id. Is the client not logged in?")
         return await command.register(self.application_id,self.token)
         pass
 
-    async def delete(self,command : Command):
+    async def delete_command(self,command : Command):
         """Delete a command. Simpler version of `BaseCommand.delete`"""
         if self.application_id is None:
             raise RuntimeError("Could not find application_id. Is the client logged in?")
@@ -174,7 +189,7 @@ class SlashClient(discord.Client):
         return await command.delete(self.application_id,self.token)
         pass
 
-    async def command_by_name(self,name : str, type : int = "any") -> Command:
+    def command_by_name(self,name : str, type : int = "any") -> Command:
         if type == SLASH_COMMAND:     commandSet = self.slash_commands  .copy()
         elif type == USER_COMMAND:    commandSet = self.user_commands   .copy()
         elif type == MESSAGE_COMMAND: commandSet = self.message_commands.copy()
@@ -199,7 +214,7 @@ class SlashClient(discord.Client):
         self, 
         name : str, 
         *, 
-        description : str = None,
+        description : str,
         descriptions : Union[Iterable[str],None] = None, 
         options : Union[CommandOptions,None] = None, 
         guild : Union[discord.Guild,int] = None, 
@@ -226,7 +241,7 @@ class SlashClient(discord.Client):
                 defaultsDict = {arg:default for arg, default in zip(argspec.args[defaultStartingIndex:], defaults)}
 
                 raw_options = []
-                if descriptions is None or len(descriptions) != len(argspec.args):
+                if (len(descriptions) if descriptions is not None else 0) != len(argspec.args):
                     raise ValueError("You need to give each option a description. Pass `descriptions` an Iterable of strings with the same length as the amount of arguments. Your version was either unset or of a different length.")
                     pass
                 for i in range(len(argspec.args)):
@@ -315,7 +330,7 @@ class SlashClient(discord.Client):
         pass
 
     # GET Interaction with the Discord API
-    async def get_application_commands(self, guild : Union[discord.Guild,int] = None) -> tuple[set[SlashCommand],set[UserCommand],set[SlashCommand]]:
+    async def get_application_commands(self, guild : Union[discord.Guild,int] = None) -> tuple[set[SlashCommand],set[UserCommand],set[MessageCommand]]:
         """Retrieves all application commands.\n
         By default this accesses the global commands, but can be set to only gather guild commands, by passing in the `guild` parameter.\n
         It also will update the internal registers of commands
