@@ -1,13 +1,10 @@
-"""TODO: Find a way to implement the partial channel passed by the slash command."""
-
-
 if __name__=="__main__": raise RuntimeError("This module cannot be executed as regular code")
 
 import discord
-import logging, inspect, typing
+import logging
 from typing import *
-from slash_extension.commands import *
-from slash_extension import types
+from .commands import *
+from . import types
 
 Mentionable = Union[discord.User, discord.Member, discord.Role]
 
@@ -26,20 +23,6 @@ REV_TYPE_MATCHER = {v:key for key, values in TYPE_MATCHER.items() for v in value
 SIMPLE_CONVERSION = {STRING,INTEGER,NUMBER,BOOLEAN}
 
 # Utils
-
-def definite_guild_id(guild : Union[discord.Guild,int,None]):
-    if isinstance(guild,discord.Guild):
-        return guild.id
-        pass
-    elif isinstance(guild,int):
-        return guild
-        pass
-    elif guild is None:
-        return guild
-    else:
-        raise TypeError(f"Expected type guild object or guild_id, got type {type(guild)}")
-        pass
-    pass
 
 def target_from_interaction(interaction : discord.Interaction) -> discord.Member:
     resolved = interaction.data.get("resolved")

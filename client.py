@@ -1,8 +1,9 @@
 if __name__=="__main__": raise RuntimeError("This module cannot be executed as regular code")
-from slash_extension.commands import *
-from slash_extension.interactions import *
+from .commands import *
+from .interactions import *
+from .util import *
 from typing import *
-import functools, inspect, time
+import functools, inspect, time, asyncio
 
 EMPTY = object()
 
@@ -131,12 +132,6 @@ class SlashClient(discord.Client):
         super().event(on_ready)
         pass
 
-    async def login(self, token : str):
-        self.token = token
-
-        return await super().login(token)
-        pass
-
     async def connect(self,*,reconnect : bool = True):
         return await super().connect(reconnect=reconnect)
         pass
@@ -164,10 +159,10 @@ class SlashClient(discord.Client):
                 continue
             
             if not command.is_identified():
-                tasks.append(asyncio.create_task(command.register(self.application_id,self.token)))
+                tasks.append(asyncio.create_task(self.register_command(command)))
                 pass
             else:
-                tasks.append(asyncio.create_task(command.update(self.application_id,self.token)))
+                tasks.append(asyncio.create_task(command.update(self.application_id,self.http.token)))
                 pass
             pass
 
@@ -178,7 +173,7 @@ class SlashClient(discord.Client):
         """Register a command. Simpler version of `BaseCommand.register`"""
         if self.application_id is None:
             raise RuntimeError("Could not find application_id. Is the client not logged in?")
-        return await command.register(self.application_id,self.token)
+        return await command.register(self.application_id,self.http)
         pass
 
     async def delete_command(self,command : Command):
@@ -186,7 +181,18 @@ class SlashClient(discord.Client):
         if self.application_id is None:
             raise RuntimeError("Could not find application_id. Is the client logged in?")
         
-        return await command.delete(self.application_id,self.token)
+        result = await command.delete(self.application_id,self.http)
+        if isinstance(command,SlashCommand):
+            self.slash_commands.remove(command)
+            pass
+        elif isinstance(command,UserCommand):
+            self.user_commands.remove(command)
+            pass
+        elif isinstance(command,MessageCommand):
+            self.message_commands.remove(command)
+            pass
+        else:
+            logging.error("Tried to delete a command but could not find a valid type for it. If you see this message, go straight to Github. I probably forgot to add something here.")
         pass
 
     def command_by_name(self,name : str, type : int = "any") -> Command:
@@ -416,29 +422,8 @@ class SlashClient(discord.Client):
             url = GUILD_CMD_BASE.format(app_id=self.user.id, guild_id=guild_id)
         else:
             url = GLOBAL_CMD_BASE.format(app_id=self.user.id)
-        async with aiohttp.ClientSession() as conn:
-            while True:
-                async with conn.get(url,headers={"Authorization":f"Bot {self.token}"}) as resp:
-                    if resp.status == 429: # Check if being rate limited
-                        await asyncio.sleep((await resp.json()).get("retry_after")) # Wait returned amount of time before continuing
-                        pass
-
-                    elif resp.status == 404:
-                        raise discord.errors.NotFound(resp,f"The API endpoint with for application commands of guild {guild_id} could not be found")
-                        pass
-                    elif resp.status == 403:
-                        raise discord.errors.Forbidden(resp,"This request was forbidden. Is your token invalid?")
-                        pass
-
-                    elif resp.status in range(200,300):
-                        return await resp.json() # If no rate limit: Return the response json
-                        pass
-
-                    else:
-                        raise discord.errors.HTTPException(resp,"Unknown error")
-                    pass
-                pass
-            pass
+        
+        return await self.http.request(discord.http.Route("GET",url))
         pass
     
     def event(self,coro : Callable):

@@ -1,6 +1,8 @@
 if __name__=="__main__": raise RuntimeError("This module cannot be executed as regular code")
+from .util import definite_guild_id
 from typing import *
-import discord, json, dataclasses, re, aiohttp, asyncio, logging
+import discord, json, dataclasses, re, inspect
+import discord.http
 
 
 SLASH_COMMAND = 1
@@ -35,14 +37,14 @@ OPTION_TYPE_STRING = {
     NUMBER : "NUMBER"
 }
 
-GUILD_CMD_BASE = "https://discord.com/api/v8/applications/{app_id}/guilds/{guild_id}/commands"
-GLOBAL_CMD_BASE= "https://discord.com/api/v8/applications/{app_id}/commands"
+GUILD_CMD_BASE = "/applications/{app_id}/guilds/{guild_id}/commands"
+GLOBAL_CMD_BASE= "/applications/{app_id}/commands"
 
-GUILD_CMD_EDIT = "https://discord.com/api/v8/applications/{app_id}/guilds/{guild_id}/commands/{command_id}"
-GLOBAL_CMD_EDIT= "https://discord.com/api/v8/applications/{app_id}/commands/{command_id}"
+GUILD_CMD_EDIT = "/applications/{app_id}/guilds/{guild_id}/commands/{command_id}"
+GLOBAL_CMD_EDIT= "/applications/{app_id}/commands/{command_id}"
 
-SPECIFIC_PERM = "https://discord.com/api/v8/applications/{app_id}/guilds/{guild_id}/commands/{command_id}/permissions"
-ALL_PERM = "https://discord.com/api/v8/applications/{app_id}/guilds/{guild_id}/commands/permissions"
+SPECIFIC_PERM = "/applications/{app_id}/guilds/{guild_id}/commands/{command_id}/permissions"
+ALL_PERM = "/applications/{app_id}/guilds/{guild_id}/commands/permissions"
 
 
 # Command Option Stuff
@@ -173,16 +175,36 @@ RawPermissionRule = dict[Union[Literal["type"],Literal["id"],Literal["permission
 PermissionRule = dict[Union[Literal["type"],Literal["id"],Literal["permission"]], Union[int,int,bool]]
 
 class CommandPermissions:
+    """Unfinished, don't use """
     def __init__(self,*,rules : Optional[dict[int,PermissionRule]] = None):
         self.rules : dict[int,PermissionRule] = {} if rules is None else rules.copy()
         pass
 
-    def set_rule(self, rule : RawPermissionRule):
+    def set_raw_rule(self, rule : RawPermissionRule):
         ruleType = rule["type"]
         ruleTarget = int(rule["id"])
         ruleSetting = rule["permission"]
 
         self.rules[ruleTarget] = {"type":ruleType,"id":ruleTarget,"permission":ruleSetting}
+        pass
+    
+    def set_rule(self, target : Union[discord.Member,discord.Role, tuple], setting : bool):
+        if isinstance(target,discord.Role):
+            raw_rule_type = 1
+            raw_target = target.id
+            pass
+        elif isinstance(target,discord.Member):
+            raw_rule_type = 2
+            raw_target = target.id
+            pass
+        elif isinstance(target,tuple) and len(target) == 2:
+            raw_rule_type = target[0]
+            raw_target = target[1]
+            pass
+        else:
+            raise ValueError("Did not receive a valid target. You must provide either a `discord.Role` or `discord.Member` object.")
+
+        self.set_raw_rule({"type":raw_rule_type,"id":raw_target,"permission":setting})
         pass
 
     def remove_rule(self, rule : RawPermissionRule):
@@ -205,6 +227,18 @@ class CommandPermissions:
                 continue
             return rule["permission"]
             pass
+        pass
+
+    def to_raw(self) -> Iterable[RawPermissionRule]:
+        raw = []
+        for ruleTarget, rule in self.rules.items():
+            target = str(ruleTarget)
+            ruleType = rule["type"]
+            setting = rule["permission"]
+            raw.append({"type":ruleType, "id":target,"permission":setting})
+            pass
+
+        return raw
         pass
 
     @classmethod
@@ -239,43 +273,16 @@ class BaseCommand:
         self._differences = {}
         pass
 
-    async def register(self, application_id : int, token : str):
+    async def register(self, application_id : int, http : discord.http.HTTPClient):
         if self.guild_id is not None:
             url = GUILD_CMD_BASE.format(app_id=application_id,guild_id=self.guild_id)
         else:
             url = GLOBAL_CMD_BASE.format(app_id=application_id)
 
-        async with aiohttp.ClientSession() as session:
-            rate_limited = True
-            while rate_limited:
-                rate_limited = False
-                async with session.post(url,json=self.postify(),headers={"Authorization": f"Bot {token}"}) as resp:
-                    if resp.status == 200 or resp.status == 201:
-                        respJson : dict = await resp.json()
-                        self.id = int(respJson.get("id")) if "id" in respJson.keys() else None
-                        return self
-                        pass
-                    elif resp.status in (204,205,206): return None
-                    elif resp.status == 403:
-                        raise discord.errors.Forbidden(resp,"The registration of this command has been denied. Is the token valid? Is the guild valid?")
-                    elif resp.status == 404:
-                        raise discord.errors.NotFound(resp,"Could not find the resource. Did you pass in a correct guild?")
-                    
-                    elif resp.status == 429:
-                        respJson = await resp.json()
-                        logging.warn(f"We are being rate limited. Retrying after {respJson.get('retry_after')} seconds")
-                        await asyncio.sleep(respJson.get("retry_after"))
-                        rate_limited = True
-                        pass
-                    # Other error
-                    else:
-                        raise discord.errors.HTTPException(resp,"")
-                    pass
-                pass
-            pass
+        return await http.request(discord.http.Route("POST",url),json=self.postify())
         pass
 
-    async def update(self, application_id : int, token : str):
+    async def update(self, application_id : int, http : discord.http.HTTPClient):
         if not self.is_identified():
             raise RuntimeError("Command has no stored id. Maybe this command hasn't been registered yet?")
             pass
@@ -286,57 +293,10 @@ class BaseCommand:
             url = GLOBAL_CMD_EDIT.format(app_id = application_id, command_id = self.id)
             pass
 
-        async with aiohttp.ClientSession() as session:
-            rate_limited = True
-            while rate_limited:
-                rate_limited = False
-                
-                jsonData = self._differences
-                if "options" in jsonData.keys(): 
-                    jsonData["options"] = jsonData["options"].comprehend()
-                    pass
-
-                async with session.patch(url,json=jsonData,headers={"Authorization":f"Bot {token}"}) as resp:
-                    if resp.status == 200:
-                        respJson : dict[str,Any] = await resp.json()
-                        
-                        self.id = int(respJson.get("id")) if "id" in respJson.keys() else None
-                        self.guild_id = respJson.get("guild_id")
-                        self.name = respJson.get("name")
-                        self.description = respJson.get("description")
-                        self.default_permission = respJson.get("default_permission")
-
-                        self._differences = {}
-                        return self
-                        pass
-                    elif resp.status == 403:
-                        raise discord.errors.Forbidden(resp,"Access to the resource was denied. Is the token invalid? Are you passing in the wrong app_id?")
-                        pass
-                    elif resp.status == 404:
-                        raise discord.errors.NotFound(resp,"Command could not be located. If this error occurs frequently, please report it on GitHub.")
-                        pass
-
-                    # Rate Limit fix
-                    elif resp.status == 429:
-                        respJson = await resp.json()
-                        logging.warn(f"We are being rate limited, waiting {respJson.get('retry_after')}")
-                        await asyncio.sleep(respJson.get("retry_after"))
-                        rate_limited = True
-                        pass
-
-                    # Any OK response or Redirection gets abandoned here
-                    elif resp.status in range(200,300):
-                        pass
-
-                    # Other errors
-                    else:
-                        raise discord.errors.HTTPException(resp,"")
-                    pass
-                pass
-            pass
+        return await http.request(discord.http.Route("POST",url),json=self.postify())
         pass
 
-    async def delete(self, application_id : int, token : str):
+    async def delete(self, application_id : int, http : discord.http.HTTPClient):
         if not self.is_identified():
             raise RuntimeError("Command has no stored id. Maybe this command hasn't been registered yet?")
             pass
@@ -347,60 +307,34 @@ class BaseCommand:
             url = GLOBAL_CMD_EDIT.format(app_id = application_id, command_id = self.id)
             pass
 
-        async with aiohttp.ClientSession() as session:
-            async with session.delete(url,headers={"Authorization" : f"Bot {token}"}) as resp:
-                if resp.status == 204:
-                    pass
-                elif resp.status == 403:
-                    raise discord.errors.Forbidden(resp,"Discord denied this request. Is the token invalid?")
-                    pass
-                elif resp.status == 404:
-                    raise discord.errors.NotFound(resp,"Could not locate this resource. If this error occurs frequently, please report it on GitHub.")
-                    pass
-                elif resp.status in range(200,300):
-                    pass
-                else:
-                    raise discord.errors.HTTPException(resp,"")
-                    pass
-                pass
-            pass
+        return await http.request(discord.http.Route("DELETE",url))
         pass
 
-    async def get_permissions(self, application_id : int, token : str, guild_id : int):
+    async def get_permissions(self, application_id : int, guild : Union[discord.Guild, int], http : discord.http.HTTPClient):
+        """Not completed yet"""
         if not self.is_identified():
             raise RuntimeError("Command has no stored id. Maybe this command hasn't been registered yet?")
             pass
+        guild_id = definite_guild_id(guild)
         url = SPECIFIC_PERM.format(app_id=application_id,guild_id=guild_id,command_id=self.id)
-        async with aiohttp.ClientSession() as session:
-            ratelimit = True
-            while ratelimit:
-                ratelimit = False
-                async with session.get(url,headers={"Authorization" : f"Bot {token}"}) as resp:
-                    if resp.status == 200:
-                        respJson = await resp.json()
-                        pass
-                    elif resp.status == 403:
-                        raise discord.errors.Forbidden(resp,"Discord denied this request. Is the token invalid?")
-                        pass
-                    elif resp.status == 404:
-                        raise discord.errors.NotFound(resp,"Could not locate the resource. This may occur if this command hasn't been registered yet.")
-                        pass
-                    elif resp.status in range(200,300):
-                        pass
-                    elif resp.status == 429:
-                        ratelimit = True
-                        respJson = await resp.json()
-                        logging.warn(f"We are being rate limited. Retrying after {respJson.get('retry_after')} seconds")
-                        await asyncio.sleep(respJson.get('retry_after'))
-                        pass
-                    else:
-                        raise discord.errors.HTTPException(resp,"")
-                    pass
-                pass
-            permissions : Iterable[RawPermissionRule] = respJson["permissions"]
+        
+        respJson = await http.request(discord.http.Route("GET",url))
 
-            return CommandPermissions.from_raw(permissions)
+        permissions : Iterable[RawPermissionRule] = respJson["permissions"]
+
+        return CommandPermissions.from_raw(permissions)
+        pass
+
+    async def set_permissions(self,application_id : int, guild : Union[discord.Guild, int], http : discord.http.HTTPClient, permissions : CommandPermissions):
+        """Not completed"""
+        if not self.is_identified():
+            raise RuntimeError("Command has no stored id. Maybe this command hasn't been registered yet?")
             pass
+
+        guild_id = definite_guild_id(guild)
+        url = SPECIFIC_PERM.format(app_id=application_id,guild_id=guild_id,command_id=self.id)
+
+        await http.request(discord.http.Route("PUT",url),json={"permissions":permissions.to_raw()})
         pass
 
     def is_identified(self):
@@ -427,7 +361,7 @@ class BaseCommand:
         pass
 
     def __repr__(self):
-        return f"<BaseCommand name={self.name}; guild_id={self.guild_id}; default_permission={self.default_permission}; options={repr(self.options)}>"
+        return f"<BaseCommand id={self.id}; name={self.name}; guild_id={self.guild_id}; default_permission={self.default_permission}; options={repr(self.options)}>"
         pass
     pass
 
@@ -456,3 +390,53 @@ class MessageCommand(BaseCommand):
     pass
 
 Command = Union[SlashCommand,UserCommand,MessageCommand]
+
+# Command Groups
+
+class CommandNest(object):
+    """Useful to create nested subcommands / subcommand groups. 
+    Inherit from this class to complete the neccessary setup."""
+
+    def __init__(self):
+        possible_commands = inspect.getmembers(self, lambda a: inspect.iscoroutinefunction(a) and not a.__name__.startswith("_"))
+        _, self.commands = zip(*possible_commands)
+
+        _, self.subcommand_groups = zip(*inspect.getmembers(self, lambda a: inspect.isclass(a) and not a.__name__.startswith("_")))
+
+
+        pass
+
+    # Singleton behaviour
+    _instances = dict()
+    def __new__(cls):
+        if not cls in cls._instances.keys():
+            cls._instances[cls] = object.__new__(cls)
+            pass
+        return cls._instances[cls]
+        pass
+    pass
+
+class SubcommandGroup(object):
+    """Inherit from this class to create a new Subcommand Group in a CommandNest"""
+
+    def __init__(self):
+        possible_commands = inspect.getmembers(self, lambda a: inspect.iscoroutinefunction(a) and not a.__name__.startswith("_"))
+        _, self.commands = zip(*possible_commands)
+        self.commands : tuple[Callable]
+        pass
+
+    # Singleton behaviour
+    _instances = dict()
+    def __new__(cls):
+        if not cls in cls._instances.keys():
+            cls._instances[cls] = object.__new__(cls)
+            pass
+        return cls._instances[cls]
+        pass
+    pass
+discord.Intents.default
+
+
+def interpretSubcommandSystem(nest : CommandNest):
+    nest.subcommand_groups
+    pass
